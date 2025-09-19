@@ -1,10 +1,15 @@
 package com.loliwolf.gostructcopy.core;
 
 import com.goide.psi.*;
+import com.goide.sdk.GoSdkUtil;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFileSystemItem;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -16,10 +21,26 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.mockStatic;
+import org.mockito.MockedStatic;
 
 public class GoStructCopyProcessorTest {
 
     private final GoStructCopyProcessor processor = new GoStructCopyProcessor();
+    private MockedStatic<GoSdkUtil> goSdkUtilMock;
+
+    @Before
+    public void setUp() {
+        goSdkUtilMock = mockStatic(GoSdkUtil.class);
+        goSdkUtilMock.when(() -> GoSdkUtil.isInSdk(any(PsiFileSystemItem.class))).thenReturn(false);
+    }
+
+    @After
+    public void tearDown() {
+        if (goSdkUtilMock != null) {
+            goSdkUtilMock.close();
+        }
+    }
 
     @Test
     public void expandStruct_collectsNestedStructs() {
@@ -72,6 +93,7 @@ public class GoStructCopyProcessorTest {
     public void expandStruct_stopsAtGoSdk() {
         GoFile mainFile = createGoFile("main", null, null);
         GoFile timeFile = createGoFile("time", null, "time");
+        goSdkUtilMock.when(() -> GoSdkUtil.isInSdk(timeFile)).thenReturn(true);
         GoTypeSpec timeSpec = createStructSpec("Time", timeFile);
         GoSpecType timeSpecType = timeSpec.getSpecType();
         doReturn(createStructType("wall", "uint64")).when(timeSpecType).getType();
@@ -140,6 +162,48 @@ public class GoStructCopyProcessorTest {
                 }
 
                 type NormalizedName string
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_expandsNestedImportedStructs() {
+        GoFile mainFile = createGoFile("main", null, null);
+        GoFile middleFile = createGoFile("middle", null, "github.com/example/middle");
+        GoFile innerFile = createGoFile("inner", null, "project/internalpkg");
+
+        GoTypeSpec innerSpec = createStructSpec("Inner", innerFile);
+        GoStructType innerStruct = createStructType("Value", "string");
+        GoSpecType innerSpecType = innerSpec.getSpecType();
+        doReturn(innerStruct).when(innerSpecType).getType();
+
+        GoTypeSpec middleSpec = createStructSpec("Middle", middleFile);
+        GoStructType middleStruct = createStructTypeWithReference("Title", "string", "Inner", innerSpec, "Inner");
+        GoSpecType middleSpecType = middleSpec.getSpecType();
+        doReturn(middleStruct).when(middleSpecType).getType();
+
+        GoTypeSpec outerSpec = createStructSpec("Outer", mainFile);
+        GoStructType outerStruct = createStructTypeWithReference("Name", "string", "Middle", middleSpec, "Middle");
+        GoSpecType outerSpecType = outerSpec.getSpecType();
+        doReturn(outerStruct).when(outerSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(outerSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Outer struct {
+                \tName string
+                \tMiddle Middle
+                }
+
+                type Middle struct {
+                \tTitle string
+                \tInner Inner
+                }
+
+                type Inner struct {
+                \tValue string
+                }
                 """;
         assertEquals(expected, result.content());
     }
@@ -238,9 +302,12 @@ public class GoStructCopyProcessorTest {
     @NotNull
     private GoFile createGoFile(@NotNull String packageName, @Nullable VirtualFile virtualFile, @Nullable String importPath) {
         GoFile file = mock(GoFile.class);
+        Project project = mock(Project.class);
+        VirtualFile actualVirtualFile = virtualFile != null ? virtualFile : mock(VirtualFile.class);
+        when(file.getProject()).thenReturn(project);
         when(file.getImportPath(true)).thenReturn(importPath);
         when(file.getPackageName()).thenReturn(packageName);
-        when(file.getVirtualFile()).thenReturn(virtualFile);
+        when(file.getVirtualFile()).thenReturn(actualVirtualFile);
         return file;
     }
 }

@@ -1,6 +1,7 @@
 package com.loliwolf.gostructcopy.core;
 
 import com.goide.psi.*;
+import com.goide.sdk.GoSdkUtil;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
@@ -161,11 +162,8 @@ public final class GoStructCopyProcessor {
     private boolean shouldExpandSpec(@NotNull GoTypeSpec spec) {
         PsiFile file = spec.getContainingFile();
         if (file instanceof GoFile goFile) {
-            String importPath = goFile.getImportPath(true);
-            if (!StringUtil.isEmpty(importPath)) {
-                if (!importPath.contains(".")) {
-                    return false;
-                }
+            if (GoSdkUtil.isInSdk(goFile)) {
+                return false;
             }
         }
         return true;
