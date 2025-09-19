@@ -229,6 +229,5 @@ GoStructCopy/
 
 ## 📚 更多信息
 
-- [详细使用指南](USAGE.md)
 - [GoLand 插件开发文档](https://plugins.jetbrains.com/docs/intellij/welcome.html)
 - [Go 语言官方文档](https://golang.org/doc/)
