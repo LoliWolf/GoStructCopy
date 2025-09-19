@@ -1,13 +1,18 @@
 package com.loliwolf.gostructcopy.core;
 
 import com.goide.psi.*;
+import com.goide.sdk.GoSdkUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Collections;
+
+import org.mockito.MockedStatic;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -16,10 +21,25 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.mockStatic;
 
 public class GoStructCopyProcessorTest {
 
     private final GoStructCopyProcessor processor = new GoStructCopyProcessor();
+    private MockedStatic<GoSdkUtil> goSdkUtilMock;
+
+    @Before
+    public void setUp() {
+        goSdkUtilMock = mockStatic(GoSdkUtil.class);
+        goSdkUtilMock.when(() -> GoSdkUtil.isInSdk(any(GoFile.class))).thenReturn(false);
+    }
+
+    @After
+    public void tearDown() {
+        if (goSdkUtilMock != null) {
+            goSdkUtilMock.close();
+        }
+    }
 
     @Test
     public void expandStruct_collectsNestedStructs() {
@@ -72,6 +92,7 @@ public class GoStructCopyProcessorTest {
     public void expandStruct_stopsAtGoSdk() {
         GoFile mainFile = createGoFile("main", null, null);
         GoFile timeFile = createGoFile("time", null, "time");
+        goSdkUtilMock.when(() -> GoSdkUtil.isInSdk(timeFile)).thenReturn(true);
         GoTypeSpec timeSpec = createStructSpec("Time", timeFile);
         GoSpecType timeSpecType = timeSpec.getSpecType();
         doReturn(createStructType("wall", "uint64")).when(timeSpecType).getType();
@@ -140,6 +161,37 @@ public class GoStructCopyProcessorTest {
                 }
 
                 type NormalizedName string
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_expandsTransitiveStructsWithoutQualifiedImportPath() {
+        GoFile outerFile = createGoFile("pkg1", null, "pkg1");
+        GoFile innerFile = createGoFile("pkg2", null, "pkg2");
+
+        GoTypeSpec innerSpec = createStructSpec("Inner", innerFile);
+        GoStructType innerStruct = createStructType("Value", "string");
+        GoSpecType innerSpecType = innerSpec.getSpecType();
+        doReturn(innerStruct).when(innerSpecType).getType();
+
+        GoTypeSpec outerSpec = createStructSpec("Outer", outerFile);
+        GoStructType outerStruct = createStructTypeWithReference("ID", "int", "Nested", innerSpec, "pkg2.Inner");
+        GoSpecType outerSpecType = outerSpec.getSpecType();
+        doReturn(outerStruct).when(outerSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(outerSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Outer struct {
+                \tID int
+                \tNested pkg2.Inner
+                }
+
+                type Inner struct {
+                \tValue string
+                }
                 """;
         assertEquals(expected, result.content());
     }
@@ -238,9 +290,10 @@ public class GoStructCopyProcessorTest {
     @NotNull
     private GoFile createGoFile(@NotNull String packageName, @Nullable VirtualFile virtualFile, @Nullable String importPath) {
         GoFile file = mock(GoFile.class);
+        VirtualFile resolvedVirtualFile = virtualFile != null ? virtualFile : mock(VirtualFile.class);
         when(file.getImportPath(true)).thenReturn(importPath);
         when(file.getPackageName()).thenReturn(packageName);
-        when(file.getVirtualFile()).thenReturn(virtualFile);
+        when(file.getVirtualFile()).thenReturn(resolvedVirtualFile);
         return file;
     }
 }

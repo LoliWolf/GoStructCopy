@@ -7,6 +7,7 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.ResolveState;
 import com.intellij.psi.util.PsiTreeUtil;
+import com.goide.sdk.GoSdkUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -162,8 +163,9 @@ public final class GoStructCopyProcessor {
         PsiFile file = spec.getContainingFile();
         if (file instanceof GoFile goFile) {
             String importPath = goFile.getImportPath(true);
-            if (!StringUtil.isEmpty(importPath)) {
-                if (!importPath.contains(".")) {
+            if (!StringUtil.isEmpty(importPath) && !importPath.contains(".")) {
+                VirtualFile virtualFile = goFile.getVirtualFile();
+                if (virtualFile != null && GoSdkUtil.isInSdk(goFile)) {
                     return false;
                 }
             }
