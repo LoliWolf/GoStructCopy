@@ -144,6 +144,84 @@ public class GoStructCopyProcessorTest {
         assertEquals(expected, result.content());
     }
 
+    @Test
+    public void expandStruct_expandsStructsAcrossImportedPackages() {
+        GoFile outerFile = createGoFile("outer", null, null);
+        GoFile innerFile = createGoFile("innerpkg", null, "github.com/example/innerpkg");
+        GoFile deepFile = createGoFile("deeppkg", null, "github.com/example/deeppkg");
+
+        GoTypeSpec deepSpec = createStructSpec("Deep", deepFile);
+        GoStructType deepStruct = createStructType("Value", "string");
+        GoSpecType deepSpecType = deepSpec.getSpecType();
+        doReturn(deepStruct).when(deepSpecType).getType();
+
+        GoTypeSpec innerSpec = createStructSpec("Inner", innerFile);
+        GoStructType innerStruct = createStructTypeWithReference("ID", "int", "Deep", deepSpec, "deeppkg.Deep");
+        GoSpecType innerSpecType = innerSpec.getSpecType();
+        doReturn(innerStruct).when(innerSpecType).getType();
+
+        GoTypeSpec outerSpec = createParentSpec("Outer", outerFile, innerSpec, "Inner", "innerpkg.Inner");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(outerSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Outer struct {
+                \tName string
+                \tInner Inner
+                }
+
+                type Inner struct {
+                \tID int
+                \tDeep Deep
+                }
+
+                type Deep struct {
+                \tValue string
+                }
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_expandsSameNamedStructsFromDifferentPackages() {
+        GoFile outerFile = createGoFile("outer", null, null);
+        GoFile innerFile = createGoFile("innerpkg", null, "github.com/example/innerpkg");
+        GoFile deepFile = createGoFile("deeppkg", null, "github.com/example/deeppkg");
+
+        GoTypeSpec deepSpec = createStructSpec("Config", deepFile);
+        GoStructType deepStruct = createStructType("Value", "string");
+        GoSpecType deepSpecType = deepSpec.getSpecType();
+        doReturn(deepStruct).when(deepSpecType).getType();
+
+        GoTypeSpec innerSpec = createStructSpec("Config", innerFile);
+        GoStructType innerStruct = createStructTypeWithReference("Enabled", "bool", "Config", deepSpec, "deeppkg.Config");
+        GoSpecType innerSpecType = innerSpec.getSpecType();
+        doReturn(innerStruct).when(innerSpecType).getType();
+
+        GoTypeSpec outerSpec = createParentSpec("Outer", outerFile, innerSpec, "Config", "innerpkg.Config");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(outerSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Outer struct {
+                \tName string
+                \tConfig Config
+                }
+
+                type Config struct {
+                \tEnabled bool
+                \tConfig DeeppkgConfig
+                }
+
+                type DeeppkgConfig struct {
+                \tValue string
+                }
+                """;
+        assertEquals(expected, result.content());
+    }
+
     private GoTypeSpec createParentSpec(@NotNull String name, @NotNull GoFile file, @NotNull GoTypeSpec childSpec, @NotNull String childFieldName, @NotNull String childTypeText) {
         GoTypeSpec parentSpec = createStructSpec(name, file);
         GoStructType structType = createStructTypeWithReference("Name", "string", childFieldName, childSpec, childTypeText);

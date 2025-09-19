@@ -206,45 +206,46 @@ public final class GoStructCopyProcessor {
         private final Map<GoStructType, String> anonymousNames = new HashMap<>();
         private int anonymousCounter = 1;
 
-        void enqueue(@NotNull String name, @NotNull GoStructType structType, @Nullable GoTypeSpec spec) {
-            if (!queuedNames.add(name)) {
+        void enqueue(@NotNull String desiredName, @NotNull GoStructType structType, @Nullable GoTypeSpec spec) {
+            NameReservation reservation = reserveUniqueName(desiredName, spec);
+            if (!reservation.newlyReserved()) {
                 return;
             }
-            if (spec != null) {
-                specNameCache.put(spec, name);
-            }
-            queue.addLast(new StructTarget(name, structType, spec));
+            queue.addLast(new StructTarget(reservation.name(), structType, spec));
         }
 
-        void enqueueSpec(@NotNull GoTypeSpec spec) {
+        @Nullable
+        String enqueueSpec(@NotNull GoTypeSpec spec) {
             if (!shouldExpandSpec(spec)) {
-                return;
+                return null;
             }
-            String name = spec.getName();
-            if (StringUtil.isEmpty(name)) {
-                return;
+            String originalName = spec.getName();
+            if (StringUtil.isEmpty(originalName)) {
+                return null;
             }
-            if (specNameCache.containsKey(spec)) {
-                return;
+            NameReservation reservation = reserveUniqueName(originalName, spec);
+            if (StringUtil.isEmpty(reservation.name())) {
+                return null;
             }
+            if (!reservation.newlyReserved()) {
+                return reservation.name();
+            }
+
             GoStructType structType = resolveStructType(spec, new HashSet<>());
             if (structType != null) {
-                enqueue(name, structType, spec);
-            } else {
-                // Handle type aliases (e.g., type NormalizedName string)
-                GoType specType = spec.getSpecType().getType();
-                if (specType != null) {
-                    // Mark this type as queued to avoid infinite recursion
-                    queuedNames.add(name);
-                    
-                    // Get the underlying type name
-                    String underlyingTypeName = renderType(specType, name, null);
-                    
-                    // Create a type alias definition
-                    StructDefinition definition = StructDefinition.typeAlias(name, underlyingTypeName);
-                    definitions.put(name, definition);
-                }
+                queue.addLast(new StructTarget(reservation.name(), structType, spec));
+                return reservation.name();
             }
+
+            GoType specType = spec.getSpecType().getType();
+            if (specType == null) {
+                return reservation.name();
+            }
+
+            String underlyingTypeName = renderType(specType, reservation.name(), null);
+            StructDefinition definition = StructDefinition.typeAlias(reservation.name(), underlyingTypeName);
+            definitions.put(reservation.name(), definition);
+            return reservation.name();
         }
 
         @NotNull
@@ -262,12 +263,13 @@ public final class GoStructCopyProcessor {
             if (StringUtil.isEmpty(baseName)) {
                 baseName = "Anonymous";
             }
-            String candidate = baseName;
-            while (queuedNames.contains(candidate) || definitions.containsKey(candidate)) {
+            NameReservation reservation = reserveUniqueName(baseName, null);
+            String candidate = reservation.name();
+            if (StringUtil.isEmpty(candidate)) {
                 candidate = baseName + anonymousCounter++;
             }
             anonymousNames.put(structType, candidate);
-            enqueue(candidate, structType, null);
+            queue.addLast(new StructTarget(candidate, structType, null));
             return candidate;
         }
 
@@ -376,24 +378,108 @@ public final class GoStructCopyProcessor {
             GoTypeReferenceExpression reference = type.getTypeReferenceExpression();
             if (reference != null) {
                 PsiElement resolved = reference.resolve();
-                if (resolved instanceof GoTypeSpec spec && shouldExpandSpec(spec)) {
-                    String name = spec.getName();
-                    if (!StringUtil.isEmpty(name)) {
-                        enqueueSpec(spec);
-                        // For complex types (like map[NormalizedName]*Flag), return the full type text
-                        // Only return the simple name if the type text is exactly the same as the name
+                if (resolved instanceof GoTypeSpec spec) {
+                    String assignedName = enqueueSpec(spec);
+                    if (!StringUtil.isEmpty(assignedName)) {
                         String typeText = type.getText();
-                        if (typeText.equals(name)) {
-                            return name;
-                        } else {
-                            return typeText;
+                        String specName = spec.getName();
+                        if (StringUtil.isEmpty(typeText) || StringUtil.isEmpty(specName)) {
+                            return assignedName;
                         }
+                        if (typeText.equals(specName) || typeText.endsWith("." + specName)) {
+                            return assignedName;
+                        }
+                        String replaced = typeText.replace(specName, assignedName);
+                        return StringUtil.isEmpty(replaced) ? assignedName : replaced;
                     }
                 }
                 return type.getText();
             }
 
             return type.getText();
+        }
+
+        @NotNull
+        private NameReservation reserveUniqueName(@NotNull String desiredName, @Nullable GoTypeSpec spec) {
+            if (spec != null) {
+                String cached = specNameCache.get(spec);
+                if (!StringUtil.isEmpty(cached)) {
+                    return new NameReservation(cached, false);
+                }
+            }
+
+            List<String> candidates = buildNameCandidates(desiredName, spec);
+            for (String candidate : candidates) {
+                if (StringUtil.isEmpty(candidate)) {
+                    continue;
+                }
+                if (queuedNames.add(candidate)) {
+                    if (spec != null) {
+                        specNameCache.put(spec, candidate);
+                    }
+                    return new NameReservation(candidate, true);
+                }
+            }
+
+            String base = candidates.isEmpty() ? "Type" : candidates.get(candidates.size() - 1);
+            if (StringUtil.isEmpty(base)) {
+                base = "Type";
+            }
+            int counter = 2;
+            while (true) {
+                String candidate = base + counter;
+                if (queuedNames.add(candidate)) {
+                    if (spec != null) {
+                        specNameCache.put(spec, candidate);
+                    }
+                    return new NameReservation(candidate, true);
+                }
+                counter++;
+            }
+        }
+
+        @NotNull
+        private List<String> buildNameCandidates(@NotNull String desiredName, @Nullable GoTypeSpec spec) {
+            List<String> result = new ArrayList<>();
+            if (!StringUtil.isEmpty(desiredName)) {
+                result.add(desiredName);
+            }
+            if (spec == null) {
+                return result;
+            }
+            PsiFile file = spec.getContainingFile();
+            if (file instanceof GoFile goFile) {
+                String packageName = goFile.getPackageName();
+                if (!StringUtil.isEmpty(packageName)) {
+                    String candidate = StringUtil.capitalize(packageName) + desiredName;
+                    if (!StringUtil.isEmpty(candidate)) {
+                        result.add(candidate);
+                    }
+                }
+                String importPath = goFile.getImportPath(true);
+                if (!StringUtil.isEmpty(importPath)) {
+                    String lastSegment = extractLastSegment(importPath);
+                    if (!StringUtil.isEmpty(lastSegment)) {
+                        String candidate = StringUtil.capitalize(lastSegment) + desiredName;
+                        if (!StringUtil.isEmpty(candidate)) {
+                            result.add(candidate);
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+
+        @Nullable
+        private String extractLastSegment(@NotNull String importPath) {
+            int index = importPath.lastIndexOf('/');
+            if (index >= 0 && index < importPath.length() - 1) {
+                return importPath.substring(index + 1);
+            }
+            return importPath;
+        }
+
+        private record NameReservation(@Nullable String name, boolean newlyReserved) {
         }
     }
 
