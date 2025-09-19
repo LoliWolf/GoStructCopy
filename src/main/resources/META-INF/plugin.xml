@@ -1,0 +1,26 @@
+<idea-plugin>
+    <id>com.loliwolf.gostructcopy</id>
+    <name>Go Struct Copy</name>
+    <version>1.0.0</version>
+    <vendor email="" url="">LoliWolf</vendor>
+    <description><![CDATA[
+        <p>Copy the current Go struct with all nested struct definitions into the system clipboard.</p>
+    ]]></description>
+    <idea-version since-build="0" until-build="999.*"/>
+    <depends>com.intellij.modules.platform</depends>
+    <depends>org.jetbrains.plugins.go</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="GoStructCopy.Notification" displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <action id="com.loliwolf.gostructcopy.CopyStructAction"
+                class="com.loliwolf.gostructcopy.actions.GoStructCopyAction"
+                text="Copy Go Struct (Recursive)"
+                description="Copy the current Go struct and recursively expand nested structs.">
+            <add-to-group group-id="CodeMenu" anchor="last"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

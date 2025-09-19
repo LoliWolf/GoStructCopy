@@ -1,0 +1,382 @@
+package com.loliwolf.gostructcopy.core;
+
+import com.goide.psi.*;
+import com.intellij.openapi.util.text.StringUtil;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFile;
+import com.intellij.psi.ResolveState;
+import com.intellij.psi.util.PsiTreeUtil;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * Builds a textual representation of a Go struct with nested structs flattened into standalone definitions.
+ */
+public final class GoStructCopyProcessor {
+    private static final String NOT_STRUCT_ERROR = "The selected type is not a struct";
+    private static final String NOT_FOUND_ERROR = "Could not locate a struct type. Place the caret inside a struct declaration.";
+    private static final String INDENT = "\t";
+
+    @NotNull
+    public GoStructCopyResult expandAtCaret(@NotNull GoFile file, int caretOffset) {
+        PsiElement element = file.findElementAt(caretOffset);
+        if (element == null) {
+            return GoStructCopyResult.failure(NOT_FOUND_ERROR);
+        }
+
+        GoTypeSpec spec = PsiTreeUtil.getParentOfType(element, GoTypeSpec.class, false);
+        if (spec == null) {
+            GoTypeReferenceExpression reference = PsiTreeUtil.getParentOfType(element, GoTypeReferenceExpression.class, false);
+            if (reference != null) {
+                PsiElement resolved = reference.resolve();
+                if (resolved instanceof GoTypeSpec resolvedSpec) {
+                    spec = resolvedSpec;
+                }
+            }
+        }
+        if (spec == null) {
+            GoCompositeLit compositeLit = PsiTreeUtil.getParentOfType(element, GoCompositeLit.class, false);
+            if (compositeLit != null) {
+                GoTypeReferenceExpression reference = compositeLit.getTypeReferenceExpression();
+                if (reference != null) {
+                    PsiElement resolved = reference.resolve();
+                    if (resolved instanceof GoTypeSpec resolvedSpec) {
+                        spec = resolvedSpec;
+                    }
+                }
+            }
+        }
+
+        if (spec == null) {
+            return GoStructCopyResult.failure(NOT_FOUND_ERROR);
+        }
+        return expand(spec);
+    }
+
+    @NotNull
+    public GoStructCopyResult expand(@NotNull GoTypeSpec typeSpec) {
+        GoStructType structType = resolveStructType(typeSpec, new HashSet<>());
+        if (structType == null) {
+            return GoStructCopyResult.failure(NOT_STRUCT_ERROR);
+        }
+
+        DefinitionCollector collector = new DefinitionCollector();
+        String typeName = Optional.ofNullable(typeSpec.getName()).orElse("<anonymous>");
+        collector.enqueue(typeName, structType, typeSpec);
+        List<StructDefinition> definitions = collector.process();
+        if (definitions.isEmpty()) {
+            return GoStructCopyResult.failure(NOT_STRUCT_ERROR);
+        }
+
+        String content = renderDefinitions(definitions);
+        String message = "Copied struct " + typeName + " to clipboard";
+        return GoStructCopyResult.success(content, message);
+    }
+
+    @Nullable
+    private GoStructType resolveStructType(@NotNull GoTypeSpec typeSpec, @NotNull Set<GoTypeSpec> visited) {
+        if (!visited.add(typeSpec)) {
+            return null;
+        }
+        GoType type = typeSpec.getSpecType().getType();
+        GoStructType directStruct = findStructLiteral(type);
+        if (directStruct != null) {
+            return directStruct;
+        }
+        if (type != null) {
+            GoType underlying = type.getUnderlyingType(ResolveState.initial());
+            GoStructType underlyingStruct = findStructLiteral(underlying);
+            if (underlyingStruct != null) {
+                return underlyingStruct;
+            }
+            GoTypeReferenceExpression reference = type.getTypeReferenceExpression();
+            if (reference != null) {
+                PsiElement resolved = reference.resolve();
+                if (resolved instanceof GoTypeSpec otherSpec) {
+                    return resolveStructType(otherSpec, visited);
+                }
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static GoStructType findStructLiteral(@Nullable GoType type) {
+        if (type instanceof GoStructType structType) {
+            return structType;
+        }
+        return null;
+    }
+
+    private String renderDefinitions(@NotNull List<StructDefinition> definitions) {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < definitions.size(); i++) {
+            StructDefinition definition = definitions.get(i);
+            builder.append("type ").append(definition.name()).append(" struct {\n");
+            for (FieldDefinition field : definition.fields()) {
+                builder.append(INDENT);
+                if (field.isEmbedded()) {
+                    builder.append(field.type());
+                } else {
+                    builder.append(field.name()).append(' ').append(field.type());
+                }
+                if (field.tag() != null) {
+                    builder.append(' ').append(field.tag());
+                }
+                builder.append('\n');
+            }
+            builder.append("}\n");
+            if (i < definitions.size() - 1) {
+                builder.append('\n');
+            }
+        }
+        return builder.toString();
+    }
+
+    private boolean shouldExpandSpec(@NotNull GoTypeSpec spec) {
+        PsiFile file = spec.getContainingFile();
+        if (file instanceof GoFile goFile) {
+            String importPath = goFile.getImportPath(true);
+            if (!StringUtil.isEmpty(importPath)) {
+                if (!importPath.contains(".")) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private @Nullable String sanitizeJsonTag(@Nullable GoTag tag) {
+        if (tag == null) {
+            return null;
+        }
+        String text = tag.getText();
+        if (StringUtil.isEmpty(text)) {
+            return null;
+        }
+        String raw = text;
+        if (text.startsWith("`") && text.endsWith("`")) {
+            raw = text.substring(1, text.length() - 1).trim();
+        }
+        if (raw.isEmpty()) {
+            return null;
+        }
+        String[] parts = raw.split("\\s+");
+        for (String part : parts) {
+            if (part.startsWith("json=\"")) {
+                return '`' + part + '`';
+            }
+            if (part.startsWith("json:\"")) {
+                return '`' + part + '`';
+            }
+        }
+        return null;
+    }
+
+    private final class DefinitionCollector {
+        private final ArrayDeque<StructTarget> queue = new ArrayDeque<>();
+        private final LinkedHashMap<String, StructDefinition> definitions = new LinkedHashMap<>();
+        private final Set<String> queuedNames = new HashSet<>();
+        private final Map<GoTypeSpec, String> specNameCache = new HashMap<>();
+        private final Map<GoStructType, String> anonymousNames = new HashMap<>();
+        private int anonymousCounter = 1;
+
+        void enqueue(@NotNull String name, @NotNull GoStructType structType, @Nullable GoTypeSpec spec) {
+            if (!queuedNames.add(name)) {
+                return;
+            }
+            if (spec != null) {
+                specNameCache.put(spec, name);
+            }
+            queue.addLast(new StructTarget(name, structType, spec));
+        }
+
+        void enqueueSpec(@NotNull GoTypeSpec spec) {
+            if (!shouldExpandSpec(spec)) {
+                return;
+            }
+            String name = spec.getName();
+            if (StringUtil.isEmpty(name)) {
+                return;
+            }
+            if (specNameCache.containsKey(spec)) {
+                return;
+            }
+            GoStructType structType = resolveStructType(spec, new HashSet<>());
+            if (structType == null) {
+                return;
+            }
+            enqueue(name, structType, spec);
+        }
+
+        @NotNull
+        String registerAnonymous(@NotNull GoStructType structType, @NotNull String ownerName, @Nullable String fieldName) {
+            String existing = anonymousNames.get(structType);
+            if (existing != null) {
+                return existing;
+            }
+            String baseName;
+            if (!StringUtil.isEmpty(fieldName)) {
+                baseName = StringUtil.capitalize(fieldName);
+            } else {
+                baseName = StringUtil.capitalize(ownerName) + "Anonymous";
+            }
+            if (StringUtil.isEmpty(baseName)) {
+                baseName = "Anonymous";
+            }
+            String candidate = baseName;
+            while (queuedNames.contains(candidate) || definitions.containsKey(candidate)) {
+                candidate = baseName + anonymousCounter++;
+            }
+            anonymousNames.put(structType, candidate);
+            enqueue(candidate, structType, null);
+            return candidate;
+        }
+
+        @NotNull
+        List<StructDefinition> process() {
+            while (!queue.isEmpty()) {
+                StructTarget target = queue.removeFirst();
+                if (definitions.containsKey(target.typeName())) {
+                    continue;
+                }
+                List<FieldDefinition> fields = buildFields(target);
+                definitions.put(target.typeName(), new StructDefinition(target.typeName(), fields));
+            }
+            return new ArrayList<>(definitions.values());
+        }
+
+        @NotNull
+        private List<FieldDefinition> buildFields(@NotNull StructTarget target) {
+            List<FieldDefinition> result = new ArrayList<>();
+            List<GoFieldDeclaration> declarations = target.structType().getFieldDeclarationList();
+            for (GoFieldDeclaration declaration : declarations) {
+                GoAnonymousFieldDefinition anonymousField = declaration.getAnonymousFieldDefinition();
+                if (anonymousField != null) {
+                    String typeText = renderType(anonymousField.getType(), target.typeName(), anonymousField.getIdentifier() != null ? anonymousField.getIdentifier().getText() : null);
+                    if (!typeText.isEmpty()) {
+                        String tag = sanitizeJsonTag(declaration.getTag());
+                        result.add(FieldDefinition.embedded(typeText, tag));
+                    }
+                    continue;
+                }
+
+                GoType fieldType = declaration.getType();
+                String tag = sanitizeJsonTag(declaration.getTag());
+                List<GoFieldDefinition> fieldDefinitions = declaration.getFieldDefinitionList();
+                if (fieldDefinitions.isEmpty()) {
+                    String typeText = renderType(fieldType, target.typeName(), null);
+                    if (!typeText.isEmpty()) {
+                        result.add(FieldDefinition.embedded(typeText, tag));
+                    }
+                    continue;
+                }
+                for (GoFieldDefinition fieldDefinition : fieldDefinitions) {
+                    PsiElement identifier = fieldDefinition.getIdentifier();
+                    String name = identifier != null ? identifier.getText() : null;
+                    if (StringUtil.isEmpty(name)) {
+                        continue;
+                    }
+                    String typeText = renderType(fieldType, target.typeName(), name);
+                    if (typeText.isEmpty()) {
+                        continue;
+                    }
+                    result.add(FieldDefinition.named(name, typeText, tag));
+                }
+            }
+            return result;
+        }
+
+        @NotNull
+        private String renderType(@Nullable GoType type, @NotNull String ownerName, @Nullable String fieldName) {
+            if (type == null) {
+                return "";
+            }
+            if (type instanceof GoStructType structType) {
+                return registerAnonymous(structType, ownerName, fieldName);
+            }
+            if (type instanceof GoPointerType pointerType) {
+                String inner = renderType(pointerType.getType(), ownerName, fieldName);
+                return inner.isEmpty() ? "" : "*" + inner;
+            }
+            if (type instanceof GoArrayOrSliceType arrayType) {
+                String length = Optional.ofNullable(arrayType.getExpression()).map(PsiElement::getText).orElse("");
+                if (arrayType.getTripleDot() != null) {
+                    length = "...";
+                }
+                String prefix = length.isEmpty() ? "[]" : "[" + length + "]";
+                String inner = renderType(arrayType.getType(), ownerName, fieldName);
+                return prefix + inner;
+            }
+            if (type instanceof GoMapType mapType) {
+                String key = renderType(Objects.requireNonNull(mapType.getKeyType()), ownerName, fieldName);
+                String value = renderType(Objects.requireNonNull(mapType.getValueType()), ownerName, fieldName);
+                if (key.isEmpty()) {
+                    key = "interface{}";
+                }
+                if (value.isEmpty()) {
+                    value = "interface{}";
+                }
+                return "map[" + key + "]" + value;
+            }
+
+            GoTypeReferenceExpression reference = type.getTypeReferenceExpression();
+            if (reference != null) {
+                PsiElement resolved = reference.resolve();
+                if (resolved instanceof GoTypeSpec spec && shouldExpandSpec(spec)) {
+                    String name = spec.getName();
+                    if (!StringUtil.isEmpty(name)) {
+                        enqueueSpec(spec);
+                        return name;
+                    }
+                }
+                return type.getText();
+            }
+
+            return type.getText();
+        }
+    }
+
+    private record StructTarget(String typeName, GoStructType structType, @Nullable GoTypeSpec spec) {
+    }
+
+    private record StructDefinition(String name, List<FieldDefinition> fields) {
+    }
+
+    private record FieldDefinition(@Nullable String name, @NotNull String type, @Nullable String tag) {
+        static FieldDefinition named(@NotNull String name, @NotNull String type, @Nullable String tag) {
+            return new FieldDefinition(name, type, tag);
+        }
+
+        static FieldDefinition embedded(@NotNull String type, @Nullable String tag) {
+            return new FieldDefinition(null, type, tag);
+        }
+
+        boolean isEmbedded() {
+            return name == null;
+        }
+    }
+
+    public record GoStructCopyResult(boolean success, @Nullable String content, @NotNull String message) {
+        public static GoStructCopyResult success(@NotNull String content, @NotNull String message) {
+            return new GoStructCopyResult(true, content, message);
+        }
+
+        public static GoStructCopyResult failure(@NotNull String message) {
+            return new GoStructCopyResult(false, null, message);
+        }
+    }
+}
+
