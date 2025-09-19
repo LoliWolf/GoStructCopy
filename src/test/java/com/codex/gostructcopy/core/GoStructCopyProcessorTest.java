@@ -90,6 +90,60 @@ public class GoStructCopyProcessorTest {
         assertEquals(expected, result.content());
     }
 
+    @Test
+    public void expandStruct_expandsTypeAliases() {
+        GoFile file = createGoFile("main", null, null);
+
+        // 创建 NormalizedName 类型别名
+        GoTypeSpec normalizedNameSpec = createTypeAliasSpec("NormalizedName", "string", file);
+        
+        // 创建 Flag 结构体，包含 NormalizedName 类型的字段
+        GoTypeSpec flagSpec = createStructSpec("Flag", file);
+        GoStructType flagStruct = createStructTypeWithReference("Name", "string", "NormalizedName", normalizedNameSpec, "NormalizedName");
+        GoSpecType flagSpecType = flagSpec.getSpecType();
+        doReturn(flagStruct).when(flagSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(flagSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Flag struct {
+                \tName string
+                \tNormalizedName NormalizedName
+                }
+
+                type NormalizedName string
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_expandsNestedTypeAliases() {
+        GoFile file = createGoFile("main", null, null);
+
+        // 创建 NormalizedName 类型别名
+        GoTypeSpec normalizedNameSpec = createTypeAliasSpec("NormalizedName", "string", file);
+        
+        // 创建 FlagSet 结构体，包含 map[NormalizedName]*Flag
+        GoTypeSpec flagSetSpec = createStructSpec("FlagSet", file);
+        GoStructType flagSetStruct = createStructTypeWithReference("Usage", "func()", "actual", normalizedNameSpec, "map[NormalizedName]*Flag");
+        GoSpecType flagSetSpecType = flagSetSpec.getSpecType();
+        doReturn(flagSetStruct).when(flagSetSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(flagSetSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type FlagSet struct {
+                \tUsage func()
+                \tactual map[NormalizedName]*Flag
+                }
+
+                type NormalizedName string
+                """;
+        assertEquals(expected, result.content());
+    }
+
     private GoTypeSpec createParentSpec(@NotNull String name, @NotNull GoFile file, @NotNull GoTypeSpec childSpec, @NotNull String childFieldName, @NotNull String childTypeText) {
         GoTypeSpec parentSpec = createStructSpec(name, file);
         GoStructType structType = createStructTypeWithReference("Name", "string", childFieldName, childSpec, childTypeText);
@@ -149,6 +203,22 @@ public class GoStructCopyProcessorTest {
 
     private GoTypeSpec createStructSpec(@NotNull String name, @NotNull GoFile file) {
         GoTypeSpec spec = createEmptySpec(name, file);
+        return spec;
+    }
+
+    private GoTypeSpec createTypeAliasSpec(@NotNull String name, @NotNull String underlyingType, @NotNull GoFile file) {
+        GoTypeSpec spec = mock(GoTypeSpec.class, RETURNS_DEEP_STUBS);
+        GoType aliasType = mock(GoType.class);
+        
+        // 模拟类型别名：type NormalizedName string
+        when(aliasType.getText()).thenReturn(underlyingType);
+        when(aliasType.getTypeReferenceExpression()).thenReturn(null);
+        
+        GoSpecType specType = spec.getSpecType();
+        doReturn(aliasType).when(specType).getType();
+        when(spec.getName()).thenReturn(name);
+        when(spec.getContainingFile()).thenReturn(file);
+        when(spec.isEquivalentTo(any())).thenAnswer(invocation -> invocation.getArgument(0) == spec);
         return spec;
     }
 

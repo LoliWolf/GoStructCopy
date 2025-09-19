@@ -68,13 +68,18 @@ public final class GoStructCopyProcessor {
     @NotNull
     public GoStructCopyResult expand(@NotNull GoTypeSpec typeSpec) {
         GoStructType structType = resolveStructType(typeSpec, new HashSet<>());
-        if (structType == null) {
-            return GoStructCopyResult.failure(NOT_STRUCT_ERROR);
-        }
-
-        DefinitionCollector collector = new DefinitionCollector();
         String typeName = Optional.ofNullable(typeSpec.getName()).orElse("<anonymous>");
-        collector.enqueue(typeName, structType, typeSpec);
+        
+        DefinitionCollector collector = new DefinitionCollector();
+        
+        if (structType != null) {
+            // Handle struct types
+            collector.enqueue(typeName, structType, typeSpec);
+        } else {
+            // Handle type aliases - use enqueueSpec which already handles this case
+            collector.enqueueSpec(typeSpec);
+        }
+        
         List<StructDefinition> definitions = collector.process();
         if (definitions.isEmpty()) {
             return GoStructCopyResult.failure(NOT_STRUCT_ERROR);
@@ -124,20 +129,28 @@ public final class GoStructCopyProcessor {
         StringBuilder builder = new StringBuilder();
         for (int i = 0; i < definitions.size(); i++) {
             StructDefinition definition = definitions.get(i);
-            builder.append("type ").append(definition.name()).append(" struct {\n");
-            for (FieldDefinition field : definition.fields()) {
-                builder.append(INDENT);
-                if (field.isEmbedded()) {
-                    builder.append(field.type());
-                } else {
-                    builder.append(field.name()).append(' ').append(field.type());
+            
+            if (definition.isTypeAlias()) {
+                // Render type alias
+                builder.append("type ").append(definition.name()).append(" ").append(definition.underlyingType()).append("\n");
+            } else {
+                // Render struct
+                builder.append("type ").append(definition.name()).append(" struct {\n");
+                for (FieldDefinition field : definition.fields()) {
+                    builder.append(INDENT);
+                    if (field.isEmbedded()) {
+                        builder.append(field.type());
+                    } else {
+                        builder.append(field.name()).append(' ').append(field.type());
+                    }
+                    if (field.tag() != null) {
+                        builder.append(' ').append(field.tag());
+                    }
+                    builder.append('\n');
                 }
-                if (field.tag() != null) {
-                    builder.append(' ').append(field.tag());
-                }
-                builder.append('\n');
+                builder.append("}\n");
             }
-            builder.append("}\n");
+            
             if (i < definitions.size() - 1) {
                 builder.append('\n');
             }
@@ -215,10 +228,23 @@ public final class GoStructCopyProcessor {
                 return;
             }
             GoStructType structType = resolveStructType(spec, new HashSet<>());
-            if (structType == null) {
-                return;
+            if (structType != null) {
+                enqueue(name, structType, spec);
+            } else {
+                // Handle type aliases (e.g., type NormalizedName string)
+                GoType specType = spec.getSpecType().getType();
+                if (specType != null) {
+                    // Mark this type as queued to avoid infinite recursion
+                    queuedNames.add(name);
+                    
+                    // Get the underlying type name
+                    String underlyingTypeName = renderType(specType, name, null);
+                    
+                    // Create a type alias definition
+                    StructDefinition definition = StructDefinition.typeAlias(name, underlyingTypeName);
+                    definitions.put(name, definition);
+                }
             }
-            enqueue(name, structType, spec);
         }
 
         @NotNull
@@ -255,7 +281,22 @@ public final class GoStructCopyProcessor {
                 List<FieldDefinition> fields = buildFields(target);
                 definitions.put(target.typeName(), new StructDefinition(target.typeName(), fields));
             }
-            return new ArrayList<>(definitions.values());
+            
+            // Separate struct definitions and type aliases, ensuring structs come first
+            List<StructDefinition> result = new ArrayList<>();
+            List<StructDefinition> typeAliases = new ArrayList<>();
+            
+            for (StructDefinition definition : definitions.values()) {
+                if (definition.isTypeAlias()) {
+                    typeAliases.add(definition);
+                } else {
+                    result.add(definition);
+                }
+            }
+            
+            // Add type aliases after struct definitions
+            result.addAll(typeAliases);
+            return result;
         }
 
         @NotNull
@@ -339,7 +380,14 @@ public final class GoStructCopyProcessor {
                     String name = spec.getName();
                     if (!StringUtil.isEmpty(name)) {
                         enqueueSpec(spec);
-                        return name;
+                        // For complex types (like map[NormalizedName]*Flag), return the full type text
+                        // Only return the simple name if the type text is exactly the same as the name
+                        String typeText = type.getText();
+                        if (typeText.equals(name)) {
+                            return name;
+                        } else {
+                            return typeText;
+                        }
                     }
                 }
                 return type.getText();
@@ -352,7 +400,16 @@ public final class GoStructCopyProcessor {
     private record StructTarget(String typeName, GoStructType structType, @Nullable GoTypeSpec spec) {
     }
 
-    private record StructDefinition(String name, List<FieldDefinition> fields) {
+    private record StructDefinition(String name, List<FieldDefinition> fields, boolean isTypeAlias, @Nullable String underlyingType) {
+        // Constructor for struct definitions
+        public StructDefinition(String name, List<FieldDefinition> fields) {
+            this(name, fields, false, null);
+        }
+        
+        // Constructor for type alias definitions
+        public static StructDefinition typeAlias(String name, String underlyingType) {
+            return new StructDefinition(name, List.of(), true, underlyingType);
+        }
     }
 
     private record FieldDefinition(@Nullable String name, @NotNull String type, @Nullable String tag) {
