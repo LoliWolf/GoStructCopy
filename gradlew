@@ -114,6 +114,30 @@ esac
 
 CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
 
+# Check if local gradle version matches wrapper version
+WRAPPER_VERSION="8.14.3"
+USE_LOCAL_GRADLE=false
+
+# Check if gradle is available in PATH
+if command -v gradle >/dev/null 2>&1; then
+    # Get local gradle version
+    LOCAL_VERSION=$(gradle --version 2>/dev/null | grep "Gradle" | awk '{print $3}')
+    
+    # Compare versions
+    if [ "$LOCAL_VERSION" = "$WRAPPER_VERSION" ]; then
+        echo "Using local Gradle $LOCAL_VERSION instead of wrapper"
+        USE_LOCAL_GRADLE=true
+    else
+        echo "Local Gradle version $LOCAL_VERSION differs from wrapper version $WRAPPER_VERSION, using wrapper"
+    fi
+else
+    echo "Local Gradle not found in PATH, using wrapper"
+fi
+
+# If using local gradle, execute it directly
+if [ "$USE_LOCAL_GRADLE" = "true" ]; then
+    exec gradle "$@"
+fi
 
 # Determine the Java command to use to start the JVM.
 if [ -n "$JAVA_HOME" ] ; then

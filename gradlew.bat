@@ -22,7 +22,7 @@
 @rem ##########################################################################
 
 @rem Set local scope for the variables with windows NT shell
-if "%OS%"=="Windows_NT" setlocal
+if "%OS%"=="Windows_NT" setlocal enabledelayedexpansion
 
 set DIRNAME=%~dp0
 if "%DIRNAME%"=="" set DIRNAME=.
@@ -35,6 +35,24 @@ for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
 
 @rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 set DEFAULT_JVM_OPTS=-Dfile.encoding=UTF-8 "-Xmx64m" "-Xms64m"
+
+@rem Check if local gradle version matches wrapper version
+set WRAPPER_VERSION=8.14.3
+
+@rem Check if gradle is available in PATH
+where gradle >NUL 2>&1
+if !ERRORLEVEL! equ 0 (
+    @rem Get gradle version and check if it matches
+    for /f "tokens=2" %%i in ('gradle --version ^| findstr "^Gradle"') do (
+        if "%%i"=="!WRAPPER_VERSION!" (
+            echo Using local Gradle %%i instead of wrapper
+            gradle %*
+            goto end
+        ) else (
+            echo Local Gradle version %%i differs from wrapper version !WRAPPER_VERSION!, using wrapper
+        )
+    )
+)
 
 @rem Find java.exe
 if defined JAVA_HOME goto findJavaFromJavaHome
