@@ -1,11 +1,15 @@
 package com.loliwolf.gostructcopy.core;
 
 import com.goide.psi.*;
+import com.goide.sdk.GoSdkUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 
 import java.util.Collections;
 
@@ -13,13 +17,25 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 public class GoStructCopyProcessorTest {
 
     private final GoStructCopyProcessor processor = new GoStructCopyProcessor();
+    private MockedStatic<GoSdkUtil> goSdkUtilMock;
+
+    @Before
+    public void setUp() {
+        goSdkUtilMock = org.mockito.Mockito.mockStatic(GoSdkUtil.class);
+        goSdkUtilMock.when(() -> GoSdkUtil.isInSdk(any(GoFile.class))).thenReturn(false);
+    }
+
+    @After
+    public void tearDown() {
+        goSdkUtilMock.close();
+    }
 
     @Test
     public void expandStruct_collectsNestedStructs() {
@@ -75,6 +91,8 @@ public class GoStructCopyProcessorTest {
         GoTypeSpec timeSpec = createStructSpec("Time", timeFile);
         GoSpecType timeSpecType = timeSpec.getSpecType();
         doReturn(createStructType("wall", "uint64")).when(timeSpecType).getType();
+
+        goSdkUtilMock.when(() -> GoSdkUtil.isInSdk(timeFile)).thenReturn(true);
 
         GoTypeSpec objectSpec = createParentSpec("Object", mainFile, timeSpec, "Modified", "time.Time");
 
@@ -140,6 +158,45 @@ public class GoStructCopyProcessorTest {
                 }
 
                 type NormalizedName string
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_expandsNestedStructsFromNestedPackages() {
+        GoFile mainFile = createGoFile("main", null, null);
+        GoFile paymentFile = createGoFile("payment", null, "module/payment");
+        GoFile customerFile = createGoFile("customer", null, "internal/customer");
+
+        GoTypeSpec customerSpec = createStructSpec("Customer", customerFile);
+        GoStructType customerStruct = createStructType("Level", "int");
+        GoSpecType customerSpecType = customerSpec.getSpecType();
+        doReturn(customerStruct).when(customerSpecType).getType();
+
+        GoTypeSpec paymentSpec = createStructSpec("Payment", paymentFile);
+        GoStructType paymentStruct = createStructTypeWithReference("Method", "string", "Customer", customerSpec, "customer.Customer");
+        GoSpecType paymentSpecType = paymentSpec.getSpecType();
+        doReturn(paymentStruct).when(paymentSpecType).getType();
+
+        GoTypeSpec orderSpec = createParentSpec("Order", mainFile, paymentSpec, "Payment", "payment.Payment");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(orderSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Order struct {
+                \tName string
+                \tPayment payment.Payment
+                }
+
+                type Payment struct {
+                \tMethod string
+                \tCustomer customer.Customer
+                }
+
+                type Customer struct {
+                \tLevel int
+                }
                 """;
         assertEquals(expected, result.content());
     }
