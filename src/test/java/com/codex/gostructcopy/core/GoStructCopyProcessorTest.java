@@ -222,6 +222,61 @@ public class GoStructCopyProcessorTest {
         assertEquals(expected, result.content());
     }
 
+    @Test
+    public void expandStruct_handlesMultipleSameNamedStructsWithNumberSuffixes() {
+        // 创建多个包，每个包都有同名的 Config 结构体
+        GoFile mainFile = createGoFile("main", null, null);
+        GoFile pkg1File = createGoFile("pkg1", null, "github.com/example/pkg1");
+        GoFile pkg2File = createGoFile("pkg2", null, "github.com/example/pkg2");
+        GoFile pkg3File = createGoFile("pkg3", null, "github.com/example/pkg3");
+
+        // 创建 pkg3.Config
+        GoTypeSpec pkg3ConfigSpec = createStructSpec("Config", pkg3File);
+        GoStructType pkg3ConfigStruct = createStructType("Value3", "string");
+        GoSpecType pkg3ConfigSpecType = pkg3ConfigSpec.getSpecType();
+        doReturn(pkg3ConfigStruct).when(pkg3ConfigSpecType).getType();
+
+        // 创建 pkg2.Config，引用 pkg3.Config
+        GoTypeSpec pkg2ConfigSpec = createStructSpec("Config", pkg2File);
+        GoStructType pkg2ConfigStruct = createStructTypeWithReference("Value2", "string", "Config3", pkg3ConfigSpec, "pkg3.Config");
+        GoSpecType pkg2ConfigSpecType = pkg2ConfigSpec.getSpecType();
+        doReturn(pkg2ConfigStruct).when(pkg2ConfigSpecType).getType();
+
+        // 创建 pkg1.Config，引用 pkg2.Config
+        GoTypeSpec pkg1ConfigSpec = createStructSpec("Config", pkg1File);
+        GoStructType pkg1ConfigStruct = createStructTypeWithReference("Value1", "string", "Config2", pkg2ConfigSpec, "pkg2.Config");
+        GoSpecType pkg1ConfigSpecType = pkg1ConfigSpec.getSpecType();
+        doReturn(pkg1ConfigStruct).when(pkg1ConfigSpecType).getType();
+
+        // 创建主结构体，引用 pkg1.Config
+        GoTypeSpec mainSpec = createParentSpec("Main", mainFile, pkg1ConfigSpec, "Config", "pkg1.Config");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Main struct {
+                \tName string
+                \tConfig Config
+                }
+
+                type Config struct {
+                \tValue1 string
+                \tConfig2 Pkg2Config
+                }
+
+                type Pkg2Config struct {
+                \tValue2 string
+                \tConfig3 Pkg3Config
+                }
+
+                type Pkg3Config struct {
+                \tValue3 string
+                }
+                """;
+        assertEquals(expected, result.content());
+    }
+
     private GoTypeSpec createParentSpec(@NotNull String name, @NotNull GoFile file, @NotNull GoTypeSpec childSpec, @NotNull String childFieldName, @NotNull String childTypeText) {
         GoTypeSpec parentSpec = createStructSpec(name, file);
         GoStructType structType = createStructTypeWithReference("Name", "string", childFieldName, childSpec, childTypeText);

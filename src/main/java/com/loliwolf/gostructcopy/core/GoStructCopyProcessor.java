@@ -409,6 +409,8 @@ public final class GoStructCopyProcessor {
             }
 
             List<String> candidates = buildNameCandidates(desiredName, spec);
+            
+            // 首先尝试所有候选名称
             for (String candidate : candidates) {
                 if (StringUtil.isEmpty(candidate)) {
                     continue;
@@ -421,12 +423,33 @@ public final class GoStructCopyProcessor {
                 }
             }
 
-            String base = candidates.isEmpty() ? "Type" : candidates.get(candidates.size() - 1);
+            // 如果所有候选名称都被占用，则为每个候选名称尝试添加数字后缀
+            for (String candidate : candidates) {
+                if (StringUtil.isEmpty(candidate)) {
+                    continue;
+                }
+                
+                int counter = 2;
+                while (counter <= 100) { // 防止无限循环，最多尝试100次
+                    String numberedCandidate = candidate + counter;
+                    if (queuedNames.add(numberedCandidate)) {
+                        if (spec != null) {
+                            specNameCache.put(spec, numberedCandidate);
+                        }
+                        return new NameReservation(numberedCandidate, true);
+                    }
+                    counter++;
+                }
+            }
+
+            // 最后的备选方案：使用基础名称加数字
+            String base = candidates.isEmpty() ? desiredName : candidates.get(0);
             if (StringUtil.isEmpty(base)) {
                 base = "Type";
             }
+            
             int counter = 2;
-            while (true) {
+            while (counter <= 1000) { // 防止无限循环
                 String candidate = base + counter;
                 if (queuedNames.add(candidate)) {
                     if (spec != null) {
@@ -436,6 +459,14 @@ public final class GoStructCopyProcessor {
                 }
                 counter++;
             }
+            
+            // 极端情况下的最后备选
+            String fallback = "Type" + System.currentTimeMillis();
+            queuedNames.add(fallback);
+            if (spec != null) {
+                specNameCache.put(spec, fallback);
+            }
+            return new NameReservation(fallback, true);
         }
 
         @NotNull
@@ -449,20 +480,39 @@ public final class GoStructCopyProcessor {
             }
             PsiFile file = spec.getContainingFile();
             if (file instanceof GoFile goFile) {
+                // 优先使用包名作为前缀
                 String packageName = goFile.getPackageName();
-                if (!StringUtil.isEmpty(packageName)) {
+                if (!StringUtil.isEmpty(packageName) && !packageName.equals("main")) {
                     String candidate = StringUtil.capitalize(packageName) + desiredName;
-                    if (!StringUtil.isEmpty(candidate)) {
+                    if (!StringUtil.isEmpty(candidate) && !candidate.equals(desiredName)) {
                         result.add(candidate);
                     }
                 }
+                
+                // 如果包名不可用或为main，使用导入路径的最后一段
                 String importPath = goFile.getImportPath(true);
                 if (!StringUtil.isEmpty(importPath)) {
                     String lastSegment = extractLastSegment(importPath);
-                    if (!StringUtil.isEmpty(lastSegment)) {
+                    if (!StringUtil.isEmpty(lastSegment) && !lastSegment.equals(packageName)) {
                         String candidate = StringUtil.capitalize(lastSegment) + desiredName;
-                        if (!StringUtil.isEmpty(candidate)) {
+                        if (!StringUtil.isEmpty(candidate) && !candidate.equals(desiredName)) {
                             result.add(candidate);
+                        }
+                    }
+                }
+                
+                // 如果导入路径有多层，尝试使用倒数第二段
+                if (!StringUtil.isEmpty(importPath) && importPath.contains("/")) {
+                    String[] segments = importPath.split("/");
+                    if (segments.length >= 2) {
+                        String secondLastSegment = segments[segments.length - 2];
+                        if (!StringUtil.isEmpty(secondLastSegment) && 
+                            !secondLastSegment.equals(packageName) && 
+                            !secondLastSegment.equals(extractLastSegment(importPath))) {
+                            String candidate = StringUtil.capitalize(secondLastSegment) + desiredName;
+                            if (!StringUtil.isEmpty(candidate) && !candidate.equals(desiredName)) {
+                                result.add(candidate);
+                            }
                         }
                     }
                 }
