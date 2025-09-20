@@ -1,24 +1,31 @@
 package com.codex.gostructcopy.core;
 
-import com.goide.psi.*;
+import java.util.Collections;
+
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import org.junit.Test;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import com.goide.psi.GoFieldDeclaration;
+import com.goide.psi.GoFieldDefinition;
+import com.goide.psi.GoFile;
+import com.goide.psi.GoSpecType;
+import com.goide.psi.GoStructType;
+import com.goide.psi.GoType;
+import com.goide.psi.GoTypeReferenceExpression;
+import com.goide.psi.GoTypeSpec;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
 import com.loliwolf.gostructcopy.core.GoStructCopyProcessor;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
-import org.junit.Test;
-
-import java.util.Collections;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.fail;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.when;
 
 public class GoStructCopyProcessorTest {
 
