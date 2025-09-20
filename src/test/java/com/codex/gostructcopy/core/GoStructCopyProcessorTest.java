@@ -1,8 +1,9 @@
-package com.loliwolf.gostructcopy.core;
+package com.codex.gostructcopy.core;
 
 import com.goide.psi.*;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiElement;
+import com.loliwolf.gostructcopy.core.GoStructCopyProcessor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.junit.Test;
@@ -11,6 +12,8 @@ import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -223,6 +226,39 @@ public class GoStructCopyProcessorTest {
     }
 
     @Test
+    public void expandStruct_handlesMultipleTypeAliasesWithSameName() {
+        GoFile file1 = createGoFile("pkg1", null, "example.com/pkg1");
+        GoFile file2 = createGoFile("pkg2", null, "example.com/pkg2");
+
+        // 创建两个不同包中的同名类型别名
+        GoTypeSpec userIdSpec1 = createTypeAliasSpec("UserId", "string", file1);
+        GoTypeSpec userIdSpec2 = createTypeAliasSpec("UserId", "int64", file2);
+        
+        // 创建主结构体，包含两个不同的 UserId 类型
+        GoTypeSpec mainSpec = createStructSpec("Main", file1);
+        GoStructType mainStruct = createStructTypeWithTwoReferences(
+            "StringId", userIdSpec1, "UserId",
+            "IntId", userIdSpec2, "UserId"
+        );
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Main struct {
+                \tStringId Pkg1UserId
+                \tIntId Pkg2UserId
+                }
+
+                type Pkg1UserId string
+                type Pkg2UserId int64
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
     public void expandStruct_handlesMultipleSameNamedStructsWithNumberSuffixes() {
         // 创建多个包，每个包都有同名的 Config 结构体
         GoFile mainFile = createGoFile("main", null, null);
@@ -277,6 +313,50 @@ public class GoStructCopyProcessorTest {
         assertEquals(expected, result.content());
     }
 
+    @Test
+    public void expandStruct_handlesAnonymousStructs() {
+        // 这个测试验证修复了 generateCacheKey 方法中 spec 为 null 的问题
+        GoFile file = createGoFile("main", null, null);
+
+        // 创建一个包含匿名结构体字段的结构体
+        GoTypeSpec mainSpec = createStructSpec("Main", file);
+        GoStructType mainStruct = createAnonymousStructType();
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        // 主要验证：不应该抛出 IllegalArgumentException
+        try {
+            GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+            // 如果能执行到这里，说明没有抛出异常，修复成功
+            assertNotNull("Result should not be null", result);
+        } catch (IllegalArgumentException e) {
+            fail("Should not throw IllegalArgumentException when processing anonymous structs: " + e.getMessage());
+        }
+    }
+
+    private GoStructType createAnonymousStructType() {
+        GoStructType structType = mock(GoStructType.class);
+        
+        // 创建一个匿名结构体字段
+        GoFieldDeclaration anonymousField = mock(GoFieldDeclaration.class);
+        GoFieldDefinition definition = mock(GoFieldDefinition.class);
+        GoStructType anonymousType = mock(GoStructType.class);
+        
+        // 模拟匿名结构体字段（没有名称）
+        when(definition.getIdentifier()).thenReturn(null);
+        when(anonymousField.getFieldDefinitionList()).thenReturn(Collections.singletonList(definition));
+        when(anonymousType.getText()).thenReturn("struct { Value string }");
+        when(anonymousField.getType()).thenReturn(anonymousType);
+        when(anonymousField.getTag()).thenReturn(null);
+        
+        // 嵌套结构体包含一个字段
+        GoFieldDeclaration valueField = createFieldDeclaration("Value", "string");
+        when(anonymousType.getFieldDeclarationList()).thenReturn(Collections.singletonList(valueField));
+        
+        when(structType.getFieldDeclarationList()).thenReturn(Collections.singletonList(anonymousField));
+        return structType;
+    }
+
     private GoTypeSpec createParentSpec(@NotNull String name, @NotNull GoFile file, @NotNull GoTypeSpec childSpec, @NotNull String childFieldName, @NotNull String childTypeText) {
         GoTypeSpec parentSpec = createStructSpec(name, file);
         GoStructType structType = createStructTypeWithReference("Name", "string", childFieldName, childSpec, childTypeText);
@@ -296,6 +376,14 @@ public class GoStructCopyProcessorTest {
         GoStructType structType = mock(GoStructType.class);
         GoFieldDeclaration firstDeclaration = createFieldDeclaration(firstField, firstType);
         GoFieldDeclaration secondDeclaration = createReferenceField(secondField, spec, secondTypeText);
+        when(structType.getFieldDeclarationList()).thenReturn(java.util.List.of(firstDeclaration, secondDeclaration));
+        return structType;
+    }
+
+    private GoStructType createStructTypeWithTwoReferences(@NotNull String firstField, @NotNull GoTypeSpec firstSpec, @NotNull String firstTypeText, @NotNull String secondField, @NotNull GoTypeSpec secondSpec, @NotNull String secondTypeText) {
+        GoStructType structType = mock(GoStructType.class);
+        GoFieldDeclaration firstDeclaration = createReferenceField(firstField, firstSpec, firstTypeText);
+        GoFieldDeclaration secondDeclaration = createReferenceField(secondField, secondSpec, secondTypeText);
         when(structType.getFieldDeclarationList()).thenReturn(java.util.List.of(firstDeclaration, secondDeclaration));
         return structType;
     }
