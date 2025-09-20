@@ -1,21 +1,31 @@
-package com.loliwolf.gostructcopy.core;
-
-import com.goide.psi.*;
-import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.psi.PsiElement;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
-import org.junit.Test;
+package com.codex.gostructcopy.core;
 
 import java.util.Collections;
 
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import org.junit.Test;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+
+import com.goide.psi.GoFieldDeclaration;
+import com.goide.psi.GoFieldDefinition;
+import com.goide.psi.GoFile;
+import com.goide.psi.GoSpecType;
+import com.goide.psi.GoStructType;
+import com.goide.psi.GoType;
+import com.goide.psi.GoTypeReferenceExpression;
+import com.goide.psi.GoTypeSpec;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiElement;
+import com.loliwolf.gostructcopy.core.GoStructCopyProcessor;
 
 public class GoStructCopyProcessorTest {
 
@@ -144,6 +154,216 @@ public class GoStructCopyProcessorTest {
         assertEquals(expected, result.content());
     }
 
+    @Test
+    public void expandStruct_expandsStructsAcrossImportedPackages() {
+        GoFile outerFile = createGoFile("outer", null, null);
+        GoFile innerFile = createGoFile("innerpkg", null, "github.com/example/innerpkg");
+        GoFile deepFile = createGoFile("deeppkg", null, "github.com/example/deeppkg");
+
+        GoTypeSpec deepSpec = createStructSpec("Deep", deepFile);
+        GoStructType deepStruct = createStructType("Value", "string");
+        GoSpecType deepSpecType = deepSpec.getSpecType();
+        doReturn(deepStruct).when(deepSpecType).getType();
+
+        GoTypeSpec innerSpec = createStructSpec("Inner", innerFile);
+        GoStructType innerStruct = createStructTypeWithReference("ID", "int", "Deep", deepSpec, "deeppkg.Deep");
+        GoSpecType innerSpecType = innerSpec.getSpecType();
+        doReturn(innerStruct).when(innerSpecType).getType();
+
+        GoTypeSpec outerSpec = createParentSpec("Outer", outerFile, innerSpec, "Inner", "innerpkg.Inner");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(outerSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Outer struct {
+                \tName string
+                \tInner Inner
+                }
+
+                type Inner struct {
+                \tID int
+                \tDeep Deep
+                }
+
+                type Deep struct {
+                \tValue string
+                }
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_expandsSameNamedStructsFromDifferentPackages() {
+        GoFile outerFile = createGoFile("outer", null, null);
+        GoFile innerFile = createGoFile("innerpkg", null, "github.com/example/innerpkg");
+        GoFile deepFile = createGoFile("deeppkg", null, "github.com/example/deeppkg");
+
+        GoTypeSpec deepSpec = createStructSpec("Config", deepFile);
+        GoStructType deepStruct = createStructType("Value", "string");
+        GoSpecType deepSpecType = deepSpec.getSpecType();
+        doReturn(deepStruct).when(deepSpecType).getType();
+
+        GoTypeSpec innerSpec = createStructSpec("Config", innerFile);
+        GoStructType innerStruct = createStructTypeWithReference("Enabled", "bool", "Config", deepSpec, "deeppkg.Config");
+        GoSpecType innerSpecType = innerSpec.getSpecType();
+        doReturn(innerStruct).when(innerSpecType).getType();
+
+        GoTypeSpec outerSpec = createParentSpec("Outer", outerFile, innerSpec, "Config", "innerpkg.Config");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(outerSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Outer struct {
+                \tName string
+                \tConfig Config
+                }
+
+                type Config struct {
+                \tEnabled bool
+                \tConfig DeeppkgConfig
+                }
+
+                type DeeppkgConfig struct {
+                \tValue string
+                }
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_handlesMultipleTypeAliasesWithSameName() {
+        GoFile file1 = createGoFile("pkg1", null, "example.com/pkg1");
+        GoFile file2 = createGoFile("pkg2", null, "example.com/pkg2");
+
+        // 创建两个不同包中的同名类型别名
+        GoTypeSpec userIdSpec1 = createTypeAliasSpec("UserId", "string", file1);
+        GoTypeSpec userIdSpec2 = createTypeAliasSpec("UserId", "int64", file2);
+        
+        // 创建主结构体，包含两个不同的 UserId 类型
+        GoTypeSpec mainSpec = createStructSpec("Main", file1);
+        GoStructType mainStruct = createStructTypeWithTwoReferences(
+            "StringId", userIdSpec1, "UserId",
+            "IntId", userIdSpec2, "UserId"
+        );
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Main struct {
+                \tStringId Pkg1UserId
+                \tIntId Pkg2UserId
+                }
+
+                type Pkg1UserId string
+                type Pkg2UserId int64
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_handlesMultipleSameNamedStructsWithNumberSuffixes() {
+        // 创建多个包，每个包都有同名的 Config 结构体
+        GoFile mainFile = createGoFile("main", null, null);
+        GoFile pkg1File = createGoFile("pkg1", null, "github.com/example/pkg1");
+        GoFile pkg2File = createGoFile("pkg2", null, "github.com/example/pkg2");
+        GoFile pkg3File = createGoFile("pkg3", null, "github.com/example/pkg3");
+
+        // 创建 pkg3.Config
+        GoTypeSpec pkg3ConfigSpec = createStructSpec("Config", pkg3File);
+        GoStructType pkg3ConfigStruct = createStructType("Value3", "string");
+        GoSpecType pkg3ConfigSpecType = pkg3ConfigSpec.getSpecType();
+        doReturn(pkg3ConfigStruct).when(pkg3ConfigSpecType).getType();
+
+        // 创建 pkg2.Config，引用 pkg3.Config
+        GoTypeSpec pkg2ConfigSpec = createStructSpec("Config", pkg2File);
+        GoStructType pkg2ConfigStruct = createStructTypeWithReference("Value2", "string", "Config3", pkg3ConfigSpec, "pkg3.Config");
+        GoSpecType pkg2ConfigSpecType = pkg2ConfigSpec.getSpecType();
+        doReturn(pkg2ConfigStruct).when(pkg2ConfigSpecType).getType();
+
+        // 创建 pkg1.Config，引用 pkg2.Config
+        GoTypeSpec pkg1ConfigSpec = createStructSpec("Config", pkg1File);
+        GoStructType pkg1ConfigStruct = createStructTypeWithReference("Value1", "string", "Config2", pkg2ConfigSpec, "pkg2.Config");
+        GoSpecType pkg1ConfigSpecType = pkg1ConfigSpec.getSpecType();
+        doReturn(pkg1ConfigStruct).when(pkg1ConfigSpecType).getType();
+
+        // 创建主结构体，引用 pkg1.Config
+        GoTypeSpec mainSpec = createParentSpec("Main", mainFile, pkg1ConfigSpec, "Config", "pkg1.Config");
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        String expected = """
+                type Main struct {
+                \tName string
+                \tConfig Config
+                }
+
+                type Config struct {
+                \tValue1 string
+                \tConfig2 Pkg2Config
+                }
+
+                type Pkg2Config struct {
+                \tValue2 string
+                \tConfig3 Pkg3Config
+                }
+
+                type Pkg3Config struct {
+                \tValue3 string
+                }
+                """;
+        assertEquals(expected, result.content());
+    }
+
+    @Test
+    public void expandStruct_handlesAnonymousStructs() {
+        // 这个测试验证修复了 generateCacheKey 方法中 spec 为 null 的问题
+        GoFile file = createGoFile("main", null, null);
+
+        // 创建一个包含匿名结构体字段的结构体
+        GoTypeSpec mainSpec = createStructSpec("Main", file);
+        GoStructType mainStruct = createAnonymousStructType();
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        // 主要验证：不应该抛出 IllegalArgumentException
+        try {
+            GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+            // 如果能执行到这里，说明没有抛出异常，修复成功
+            assertNotNull("Result should not be null", result);
+        } catch (IllegalArgumentException e) {
+            fail("Should not throw IllegalArgumentException when processing anonymous structs: " + e.getMessage());
+        }
+    }
+
+    private GoStructType createAnonymousStructType() {
+        GoStructType structType = mock(GoStructType.class);
+        
+        // 创建一个匿名结构体字段
+        GoFieldDeclaration anonymousField = mock(GoFieldDeclaration.class);
+        GoFieldDefinition definition = mock(GoFieldDefinition.class);
+        GoStructType anonymousType = mock(GoStructType.class);
+        
+        // 模拟匿名结构体字段（没有名称）
+        when(definition.getIdentifier()).thenReturn(null);
+        when(anonymousField.getFieldDefinitionList()).thenReturn(Collections.singletonList(definition));
+        when(anonymousType.getText()).thenReturn("struct { Value string }");
+        when(anonymousField.getType()).thenReturn(anonymousType);
+        when(anonymousField.getTag()).thenReturn(null);
+        
+        // 嵌套结构体包含一个字段
+        GoFieldDeclaration valueField = createFieldDeclaration("Value", "string");
+        when(anonymousType.getFieldDeclarationList()).thenReturn(Collections.singletonList(valueField));
+        
+        when(structType.getFieldDeclarationList()).thenReturn(Collections.singletonList(anonymousField));
+        return structType;
+    }
+
     private GoTypeSpec createParentSpec(@NotNull String name, @NotNull GoFile file, @NotNull GoTypeSpec childSpec, @NotNull String childFieldName, @NotNull String childTypeText) {
         GoTypeSpec parentSpec = createStructSpec(name, file);
         GoStructType structType = createStructTypeWithReference("Name", "string", childFieldName, childSpec, childTypeText);
@@ -163,6 +383,14 @@ public class GoStructCopyProcessorTest {
         GoStructType structType = mock(GoStructType.class);
         GoFieldDeclaration firstDeclaration = createFieldDeclaration(firstField, firstType);
         GoFieldDeclaration secondDeclaration = createReferenceField(secondField, spec, secondTypeText);
+        when(structType.getFieldDeclarationList()).thenReturn(java.util.List.of(firstDeclaration, secondDeclaration));
+        return structType;
+    }
+
+    private GoStructType createStructTypeWithTwoReferences(@NotNull String firstField, @NotNull GoTypeSpec firstSpec, @NotNull String firstTypeText, @NotNull String secondField, @NotNull GoTypeSpec secondSpec, @NotNull String secondTypeText) {
+        GoStructType structType = mock(GoStructType.class);
+        GoFieldDeclaration firstDeclaration = createReferenceField(firstField, firstSpec, firstTypeText);
+        GoFieldDeclaration secondDeclaration = createReferenceField(secondField, secondSpec, secondTypeText);
         when(structType.getFieldDeclarationList()).thenReturn(java.util.List.of(firstDeclaration, secondDeclaration));
         return structType;
     }
@@ -242,6 +470,98 @@ public class GoStructCopyProcessorTest {
         when(file.getPackageName()).thenReturn(packageName);
         when(file.getVirtualFile()).thenReturn(virtualFile);
         return file;
+    }
+
+    @Test
+    public void expandStruct_handlesCurrentAndImportedPackageWithSameName() {
+        // 测试当前包和引用包中有同名结构体时，两个都应该被展开
+        GoFile currentFile = createGoFile("main", null, null);
+        GoFile importedFile = createGoFile("external", null, "github.com/example/external");
+
+        // 创建引用包中的 Config 结构体
+        GoTypeSpec importedConfigSpec = createStructSpec("Config", importedFile);
+        GoStructType importedConfigStruct = createStructType("ExternalValue", "string");
+        GoSpecType importedConfigSpecType = importedConfigSpec.getSpecType();
+        doReturn(importedConfigStruct).when(importedConfigSpecType).getType();
+
+        // 创建当前包中的 Config 结构体
+        GoTypeSpec currentConfigSpec = createStructSpec("Config", currentFile);
+        GoStructType currentConfigStruct = createStructType("LocalValue", "int");
+        GoSpecType currentConfigSpecType = currentConfigSpec.getSpecType();
+        doReturn(currentConfigStruct).when(currentConfigSpecType).getType();
+
+        // 创建主结构体，同时引用两个 Config
+        GoTypeSpec mainSpec = createStructSpec("Main", currentFile);
+        GoStructType mainStruct = createStructTypeWithTwoReferences(
+            "LocalConfig", currentConfigSpec, "Config",
+            "ImportedConfig", importedConfigSpec, "external.Config"
+        );
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        // 期望结果：两个 Config 结构体都应该被展开，一个保持原名，另一个添加包前缀
+        String content = result.content();
+        System.out.println("Actual result:\n" + content);
+        
+        // 验证两个 Config 结构体都存在
+        assertTrue("Should contain local Config struct", content.contains("type Config struct"));
+        assertTrue("Should contain external Config struct", content.contains("type ExternalConfig struct") || content.contains("type External"));
+        assertTrue("Should contain LocalValue field", content.contains("LocalValue int"));
+        assertTrue("Should contain ExternalValue field", content.contains("ExternalValue string"));
+    }
+
+    @Test
+    public void expandStruct_ensuresBothSameNamedStructsAreExpanded() {
+        // 更严格的测试：确保两个同名结构体都被完整展开
+        GoFile currentFile = createGoFile("main", null, null);
+        GoFile importedFile = createGoFile("external", null, "github.com/example/external");
+
+        // 创建引用包中的 User 结构体
+        GoTypeSpec importedUserSpec = createStructSpec("User", importedFile);
+        GoStructType importedUserStruct = createStructType("ExternalID", "string");
+        GoSpecType importedUserSpecType = importedUserSpec.getSpecType();
+        doReturn(importedUserStruct).when(importedUserSpecType).getType();
+
+        // 创建当前包中的 User 结构体
+        GoTypeSpec currentUserSpec = createStructSpec("User", currentFile);
+        GoStructType currentUserStruct = createStructType("LocalID", "int");
+        GoSpecType currentUserSpecType = currentUserSpec.getSpecType();
+        doReturn(currentUserStruct).when(currentUserSpecType).getType();
+
+        // 创建主结构体，同时引用两个 User
+        GoTypeSpec mainSpec = createStructSpec("Main", currentFile);
+        GoStructType mainStruct = createStructTypeWithTwoReferences(
+            "CurrentUser", currentUserSpec, "User",
+            "ExternalUser", importedUserSpec, "external.User"
+        );
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        String content = result.content();
+        System.out.println("=== DETAILED TEST OUTPUT ===");
+        System.out.println(content);
+        System.out.println("=== END OUTPUT ===");
+        
+        // 计算结构体定义的数量
+        int structCount = content.split("type .* struct \\{").length - 1;
+        System.out.println("Found " + structCount + " struct definitions");
+        
+        // 应该有3个结构体：Main, User (当前包), ExternalUser (引用包)
+        assertEquals("Should have exactly 3 struct definitions", 3, structCount);
+        
+        // 验证具体内容
+        assertTrue("Should contain Main struct", content.contains("type Main struct"));
+        assertTrue("Should contain local User struct", content.contains("type User struct"));
+        assertTrue("Should contain external User struct with package prefix", 
+                   content.contains("type ExternalUser struct") || content.contains("type External"));
+        assertTrue("Should contain LocalID field", content.contains("LocalID int"));
+        assertTrue("Should contain ExternalID field", content.contains("ExternalID string"));
     }
 }
 
