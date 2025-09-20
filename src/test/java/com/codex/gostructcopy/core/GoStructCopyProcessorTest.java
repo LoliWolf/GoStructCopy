@@ -464,6 +464,98 @@ public class GoStructCopyProcessorTest {
         when(file.getVirtualFile()).thenReturn(virtualFile);
         return file;
     }
+
+    @Test
+    public void expandStruct_handlesCurrentAndImportedPackageWithSameName() {
+        // 测试当前包和引用包中有同名结构体时，两个都应该被展开
+        GoFile currentFile = createGoFile("main", null, null);
+        GoFile importedFile = createGoFile("external", null, "github.com/example/external");
+
+        // 创建引用包中的 Config 结构体
+        GoTypeSpec importedConfigSpec = createStructSpec("Config", importedFile);
+        GoStructType importedConfigStruct = createStructType("ExternalValue", "string");
+        GoSpecType importedConfigSpecType = importedConfigSpec.getSpecType();
+        doReturn(importedConfigStruct).when(importedConfigSpecType).getType();
+
+        // 创建当前包中的 Config 结构体
+        GoTypeSpec currentConfigSpec = createStructSpec("Config", currentFile);
+        GoStructType currentConfigStruct = createStructType("LocalValue", "int");
+        GoSpecType currentConfigSpecType = currentConfigSpec.getSpecType();
+        doReturn(currentConfigStruct).when(currentConfigSpecType).getType();
+
+        // 创建主结构体，同时引用两个 Config
+        GoTypeSpec mainSpec = createStructSpec("Main", currentFile);
+        GoStructType mainStruct = createStructTypeWithTwoReferences(
+            "LocalConfig", currentConfigSpec, "Config",
+            "ImportedConfig", importedConfigSpec, "external.Config"
+        );
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        // 期望结果：两个 Config 结构体都应该被展开，一个保持原名，另一个添加包前缀
+        String content = result.content();
+        System.out.println("Actual result:\n" + content);
+        
+        // 验证两个 Config 结构体都存在
+        assertTrue("Should contain local Config struct", content.contains("type Config struct"));
+        assertTrue("Should contain external Config struct", content.contains("type ExternalConfig struct") || content.contains("type External"));
+        assertTrue("Should contain LocalValue field", content.contains("LocalValue int"));
+        assertTrue("Should contain ExternalValue field", content.contains("ExternalValue string"));
+    }
+
+    @Test
+    public void expandStruct_ensuresBothSameNamedStructsAreExpanded() {
+        // 更严格的测试：确保两个同名结构体都被完整展开
+        GoFile currentFile = createGoFile("main", null, null);
+        GoFile importedFile = createGoFile("external", null, "github.com/example/external");
+
+        // 创建引用包中的 User 结构体
+        GoTypeSpec importedUserSpec = createStructSpec("User", importedFile);
+        GoStructType importedUserStruct = createStructType("ExternalID", "string");
+        GoSpecType importedUserSpecType = importedUserSpec.getSpecType();
+        doReturn(importedUserStruct).when(importedUserSpecType).getType();
+
+        // 创建当前包中的 User 结构体
+        GoTypeSpec currentUserSpec = createStructSpec("User", currentFile);
+        GoStructType currentUserStruct = createStructType("LocalID", "int");
+        GoSpecType currentUserSpecType = currentUserSpec.getSpecType();
+        doReturn(currentUserStruct).when(currentUserSpecType).getType();
+
+        // 创建主结构体，同时引用两个 User
+        GoTypeSpec mainSpec = createStructSpec("Main", currentFile);
+        GoStructType mainStruct = createStructTypeWithTwoReferences(
+            "CurrentUser", currentUserSpec, "User",
+            "ExternalUser", importedUserSpec, "external.User"
+        );
+        GoSpecType mainSpecType = mainSpec.getSpecType();
+        doReturn(mainStruct).when(mainSpecType).getType();
+
+        GoStructCopyProcessor.GoStructCopyResult result = processor.expand(mainSpec);
+        assertTrue(result.success());
+
+        String content = result.content();
+        System.out.println("=== DETAILED TEST OUTPUT ===");
+        System.out.println(content);
+        System.out.println("=== END OUTPUT ===");
+        
+        // 计算结构体定义的数量
+        int structCount = content.split("type .* struct \\{").length - 1;
+        System.out.println("Found " + structCount + " struct definitions");
+        
+        // 应该有3个结构体：Main, User (当前包), ExternalUser (引用包)
+        assertEquals("Should have exactly 3 struct definitions", 3, structCount);
+        
+        // 验证具体内容
+        assertTrue("Should contain Main struct", content.contains("type Main struct"));
+        assertTrue("Should contain local User struct", content.contains("type User struct"));
+        assertTrue("Should contain external User struct with package prefix", 
+                   content.contains("type ExternalUser struct") || content.contains("type External"));
+        assertTrue("Should contain LocalID field", content.contains("LocalID int"));
+        assertTrue("Should contain ExternalID field", content.contains("ExternalID string"));
+    }
 }
 
 
